@@ -16,6 +16,7 @@
 
 package org.springaicommunity.a2a.server;
 
+import java.time.Duration;
 import java.util.List;
 
 import com.fasterxml.jackson.databind.JsonNode;
@@ -25,6 +26,7 @@ import io.a2a.spec.AgentCard;
 import io.a2a.spec.Message;
 import io.a2a.spec.MessageSendParams;
 import io.a2a.spec.SendMessageRequest;
+import io.a2a.spec.SendStreamingMessageRequest;
 import io.a2a.spec.TextPart;
 import org.junit.jupiter.api.Test;
 import org.springaicommunity.a2a.server.executor.DefaultAgentExecutor;
@@ -172,6 +174,42 @@ class A2AReactiveServerIntegrationTests {
 			.expectBody()
 			.jsonPath("$.id")
 			.isEqualTo(taskId);
+	}
+
+	/**
+	 * Tests the message/stream SSE endpoint on the reactive runtime: an Accept:
+	 * text/event-stream request must yield an ordered event stream ending with a
+	 * completed task.
+	 */
+	@Test
+	void testStreamMessage() throws Exception {
+		Message message = new Message.Builder().role(Message.Role.USER)
+			.parts(new TextPart("hello reactive streaming a2a"))
+			.messageId("msg-stream-1")
+			.build();
+		SendStreamingMessageRequest request = new SendStreamingMessageRequest("req-stream-1",
+				new MessageSendParams(message, null, null));
+
+		List<String> events = client().post()
+			.uri("/")
+			.contentType(MediaType.APPLICATION_JSON)
+			.accept(MediaType.TEXT_EVENT_STREAM)
+			.bodyValue(request)
+			.exchange()
+			.expectStatus()
+			.isOk()
+			.expectHeader()
+			.contentTypeCompatibleWith(MediaType.TEXT_EVENT_STREAM)
+			.returnResult(String.class)
+			.getResponseBody()
+			.collectList()
+			.block(Duration.ofSeconds(30));
+
+		assertThat(events).isNotEmpty();
+		JsonNode firstEvent = this.objectMapper.readTree(events.get(0));
+		assertThat(firstEvent.path("id").asText()).isEqualTo("req-stream-1");
+		assertThat(firstEvent.has("result")).isTrue();
+		assertThat(String.join("\n", events)).contains("completed");
 	}
 
 }

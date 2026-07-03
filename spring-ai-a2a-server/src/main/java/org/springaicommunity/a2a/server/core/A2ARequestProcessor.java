@@ -25,12 +25,16 @@ import io.a2a.spec.EventKind;
 import io.a2a.spec.JSONRPCError;
 import io.a2a.spec.SendMessageRequest;
 import io.a2a.spec.SendMessageResponse;
+import io.a2a.spec.SendStreamingMessageRequest;
+import io.a2a.spec.SendStreamingMessageResponse;
 import io.a2a.spec.Task;
 import io.a2a.spec.TaskIdParams;
 import io.a2a.spec.TaskQueryParams;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
+import reactor.adapter.JdkFlowAdapter;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 import reactor.core.scheduler.Schedulers;
 
@@ -86,6 +90,37 @@ public class A2ARequestProcessor {
 			return new SendMessageResponse(request.getId(),
 					new JSONRPCError(-32603, "Internal error: " + throwable.getMessage(), null));
 		})).subscribeOn(Schedulers.boundedElastic());
+	}
+
+	/**
+	 * Handles a JSON-RPC {@code message/stream} request.
+	 *
+	 * <p>
+	 * Bridges the SDK's {@link java.util.concurrent.Flow.Publisher} of streaming events
+	 * to a Reactor {@link Flux}, wrapping each event in a JSON-RPC response envelope.
+	 * {@link JSONRPCError}s are emitted as a terminal JSON-RPC error response on the
+	 * stream rather than failing the HTTP exchange.
+	 * @param request the streaming message JSON-RPC request
+	 * @return the stream of JSON-RPC response envelopes, one per A2A event, ending after
+	 * the final task event
+	 */
+	public Flux<SendStreamingMessageResponse> streamMessage(SendStreamingMessageRequest request) {
+		return Mono.fromCallable(() -> {
+			logger.debug("Received streamMessage request - id: {}", request.getId());
+			return this.requestHandler.onMessageSendStream(request.getParams(), newCallContext());
+		})
+			.subscribeOn(Schedulers.boundedElastic())
+			.flatMapMany(JdkFlowAdapter::flowPublisherToFlux)
+			.map(event -> new SendStreamingMessageResponse(request.getId(), event))
+			.onErrorResume(JSONRPCError.class, error -> {
+				logger.error("Error processing streaming message - id: {}", request.getId(), error);
+				return Mono.just(new SendStreamingMessageResponse(request.getId(), error));
+			})
+			.onErrorResume(throwable -> !(throwable instanceof JSONRPCError), throwable -> {
+				logger.error("Unexpected error processing streaming message - id: {}", request.getId(), throwable);
+				return Mono.just(new SendStreamingMessageResponse(request.getId(),
+						new JSONRPCError(-32603, "Internal error: " + throwable.getMessage(), null)));
+			});
 	}
 
 	/**

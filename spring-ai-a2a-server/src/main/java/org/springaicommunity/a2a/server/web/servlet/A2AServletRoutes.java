@@ -16,11 +16,15 @@
 
 package org.springaicommunity.a2a.server.web.servlet;
 
+import java.io.IOException;
+
 import io.a2a.spec.AgentCard;
 import io.a2a.spec.SendMessageRequest;
+import io.a2a.spec.SendStreamingMessageRequest;
 import org.springaicommunity.a2a.server.core.A2ARequestProcessor;
 
 import org.springframework.http.MediaType;
+import org.springframework.web.servlet.function.RequestPredicate;
 import org.springframework.web.servlet.function.RouterFunction;
 import org.springframework.web.servlet.function.RouterFunctions;
 import org.springframework.web.servlet.function.ServerRequest;
@@ -49,6 +53,21 @@ public final class A2AServletRoutes {
 	}
 
 	/**
+	 * Matches only when the request explicitly asks for {@code text/event-stream}.
+	 *
+	 * <p>
+	 * {@code RequestPredicates.accept(...)} also matches wildcard {@code Accept} headers
+	 * ({@code *}{@code /}{@code *}), which would misroute plain {@code message/send}
+	 * requests to the streaming handler.
+	 */
+	private static RequestPredicate acceptsEventStream() {
+		return request -> request.headers()
+			.accept()
+			.stream()
+			.anyMatch(MediaType.TEXT_EVENT_STREAM::equalsTypeAndSubtype);
+	}
+
+	/**
 	 * Builds the A2A servlet router function.
 	 * @param processor the shared A2A request processor
 	 * @param agentCard the agent card advertised by this server
@@ -56,6 +75,8 @@ public final class A2AServletRoutes {
 	 */
 	public static RouterFunction<ServerResponse> routes(A2ARequestProcessor processor, AgentCard agentCard) {
 		return RouterFunctions.route()
+			.POST("/", contentType(MediaType.APPLICATION_JSON).and(acceptsEventStream()),
+					request -> streamMessage(processor, request))
 			.POST("/", contentType(MediaType.APPLICATION_JSON), request -> sendMessage(processor, request))
 			.GET("/.well-known/agent-card.json", request -> agentCard(agentCard))
 			.GET("/card", request -> agentCard(agentCard))
@@ -68,6 +89,18 @@ public final class A2AServletRoutes {
 		SendMessageRequest body = request.body(SendMessageRequest.class);
 		return ServerResponse.async(processor.sendMessage(body)
 			.map(response -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).body(response)));
+	}
+
+	private static ServerResponse streamMessage(A2ARequestProcessor processor, ServerRequest request) throws Exception {
+		SendStreamingMessageRequest body = request.body(SendStreamingMessageRequest.class);
+		return ServerResponse.sse(sse -> processor.streamMessage(body).subscribe(response -> {
+			try {
+				sse.data(response);
+			}
+			catch (IOException ex) {
+				sse.error(ex);
+			}
+		}, sse::error, sse::complete));
 	}
 
 	private static ServerResponse agentCard(AgentCard agentCard) {

@@ -18,13 +18,18 @@ package org.springaicommunity.a2a.server.web.reactive;
 
 import io.a2a.spec.AgentCard;
 import io.a2a.spec.SendMessageRequest;
+import io.a2a.spec.SendStreamingMessageRequest;
+import io.a2a.spec.SendStreamingMessageResponse;
 import org.springaicommunity.a2a.server.core.A2ARequestProcessor;
 
 import org.springframework.http.MediaType;
+import org.springframework.http.codec.ServerSentEvent;
+import org.springframework.web.reactive.function.server.RequestPredicate;
 import org.springframework.web.reactive.function.server.RouterFunction;
 import org.springframework.web.reactive.function.server.RouterFunctions;
 import org.springframework.web.reactive.function.server.ServerRequest;
 import org.springframework.web.reactive.function.server.ServerResponse;
+import reactor.core.publisher.Flux;
 import reactor.core.publisher.Mono;
 
 import static org.springframework.web.reactive.function.server.RequestPredicates.contentType;
@@ -51,6 +56,21 @@ public final class A2AReactiveRoutes {
 	}
 
 	/**
+	 * Matches only when the request explicitly asks for {@code text/event-stream}.
+	 *
+	 * <p>
+	 * {@code RequestPredicates.accept(...)} also matches wildcard {@code Accept} headers
+	 * ({@code *}{@code /}{@code *}), which would misroute plain {@code message/send}
+	 * requests to the streaming handler.
+	 */
+	private static RequestPredicate acceptsEventStream() {
+		return request -> request.headers()
+			.accept()
+			.stream()
+			.anyMatch(MediaType.TEXT_EVENT_STREAM::equalsTypeAndSubtype);
+	}
+
+	/**
 	 * Builds the A2A reactive router function.
 	 * @param processor the shared A2A request processor
 	 * @param agentCard the agent card advertised by this server
@@ -58,6 +78,8 @@ public final class A2AReactiveRoutes {
 	 */
 	public static RouterFunction<ServerResponse> routes(A2ARequestProcessor processor, AgentCard agentCard) {
 		return RouterFunctions.route()
+			.POST("/", contentType(MediaType.APPLICATION_JSON).and(acceptsEventStream()),
+					request -> streamMessage(processor, request))
 			.POST("/", contentType(MediaType.APPLICATION_JSON), request -> sendMessage(processor, request))
 			.GET("/.well-known/agent-card.json", request -> agentCard(agentCard))
 			.GET("/card", request -> agentCard(agentCard))
@@ -70,6 +92,18 @@ public final class A2AReactiveRoutes {
 		return request.bodyToMono(SendMessageRequest.class)
 			.flatMap(processor::sendMessage)
 			.flatMap(response -> ServerResponse.ok().contentType(MediaType.APPLICATION_JSON).bodyValue(response));
+	}
+
+	private static Mono<ServerResponse> streamMessage(A2ARequestProcessor processor, ServerRequest request) {
+		return request.bodyToMono(SendStreamingMessageRequest.class).flatMap(body -> {
+			Flux<ServerSentEvent<SendStreamingMessageResponse>> events = processor.streamMessage(body)
+				.map(response -> ServerSentEvent.builder(response).build());
+			return ServerResponse.ok()
+				.contentType(MediaType.TEXT_EVENT_STREAM)
+				.body(events,
+						new org.springframework.core.ParameterizedTypeReference<ServerSentEvent<SendStreamingMessageResponse>>() {
+						});
+		});
 	}
 
 	private static Mono<ServerResponse> agentCard(AgentCard agentCard) {
